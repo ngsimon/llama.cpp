@@ -1695,26 +1695,29 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
 void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir,
                                    size_t n_threads, size_t n_devices, ggml_backend_dev_t * devices) {
     if (n_devices == 0 || devices == nullptr) {
-        fprintf(stderr, "Invalid arguments to ggml_backend_rpc_start_server\n");
+        GGML_LOG_ERROR("Invalid arguments to ggml_backend_rpc_start_server\n");
         return;
     }
     std::vector<ggml_backend_t> backends;
-    printf("Starting RPC server v%d.%d.%d\n",
+    // NOTE: emit the server lifecycle banner through ggml's logger (was printf)
+    // so host embedders can capture it via ggml_log_set — e.g. the Llama RPC app
+    // routes these INFO lines into its in-app Logs UI (see BEELLAMA.md).
+    GGML_LOG_INFO("Starting RPC server v%d.%d.%d\n",
         RPC_PROTO_MAJOR_VERSION,
         RPC_PROTO_MINOR_VERSION,
         RPC_PROTO_PATCH_VERSION);
-    printf("  endpoint       : %s\n", endpoint);
-    printf("  local cache    : %s\n", cache_dir ? cache_dir : "n/a");
-    printf("Devices:\n");
+    GGML_LOG_INFO("  endpoint       : %s\n", endpoint);
+    GGML_LOG_INFO("  local cache    : %s\n", cache_dir ? cache_dir : "n/a");
+    GGML_LOG_INFO("Devices:\n");
     for (size_t i = 0; i < n_devices; i++) {
         auto dev = devices[i];
         size_t free, total;
         ggml_backend_dev_memory(dev, &free, &total);
-        printf("  %s: %s (%zu MiB, %zu MiB free)\n", ggml_backend_dev_name(dev), ggml_backend_dev_description(dev),
+        GGML_LOG_INFO("  %s: %s (%zu MiB, %zu MiB free)\n", ggml_backend_dev_name(dev), ggml_backend_dev_description(dev),
                total / 1024 / 1024, free / 1024 / 1024);
         auto backend = ggml_backend_dev_init(dev, nullptr);
         if (!backend) {
-            fprintf(stderr, "Failed to create backend for device %s\n", dev->iface.get_name(dev));
+            GGML_LOG_ERROR("Failed to create backend for device %s\n", dev->iface.get_name(dev));
             return;
         }
         backends.push_back(backend);
@@ -1734,29 +1737,29 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
     }
 
 #ifdef GGML_RPC_RDMA
-    printf("  transport      : TCP (RDMA auto-negotiate enabled)\n");
+    GGML_LOG_INFO("  transport      : TCP (RDMA auto-negotiate enabled)\n");
 #else
-    printf("  transport      : TCP\n");
+    GGML_LOG_INFO("  transport      : TCP\n");
 #endif // GGML_RPC_RDMA
     if (!rpc_transport_init()) {
-        fprintf(stderr, "Failed to initialize RPC transport\n");
+        GGML_LOG_ERROR("Failed to initialize RPC transport\n");
         return;
     }
     auto server_socket = socket_t::create_server(host.c_str(), port);
     if (server_socket == nullptr) {
-        fprintf(stderr, "Failed to create server socket\n");
+        GGML_LOG_ERROR("Failed to create server socket\n");
         return;
     }
     while (true) {
         auto client_socket = server_socket->accept();
         if (client_socket == nullptr) {
-            fprintf(stderr, "Failed to accept client connection\n");
+            GGML_LOG_ERROR("Failed to accept client connection\n");
             return;
         }
-        printf("Accepted client connection\n");
+        GGML_LOG_INFO("Accepted client connection\n");
         fflush(stdout);
         rpc_serve_client(backends, cache_dir, client_socket);
-        printf("Client connection closed\n");
+        GGML_LOG_INFO("Client connection closed\n");
         fflush(stdout);
     }
     rpc_transport_shutdown();
