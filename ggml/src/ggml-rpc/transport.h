@@ -18,6 +18,12 @@ struct socket_t {
 
     socket_ptr accept();
 
+    // Half-closes both directions of the underlying fd (::shutdown). Used to
+    // wake a thread blocked in accept()/recv() on this socket from another
+    // thread — closing the fd instead is racy and does not reliably interrupt
+    // a blocked accept() on all platforms (notably Darwin).
+    void shutdown_rw();
+
     void get_caps(uint8_t * local_caps);
     void update_caps(const uint8_t * remote_caps);
 

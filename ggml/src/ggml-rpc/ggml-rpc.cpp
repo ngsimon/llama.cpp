@@ -1692,6 +1692,60 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
     }
 }
 
+// Registry of running servers so ggml_backend_rpc_stop_server(endpoint) can
+// gracefully stop a server started with ggml_backend_rpc_start_server (which
+// otherwise blocks forever on its accept loop). One entry per endpoint string.
+struct rpc_server_instance {
+    socket_ptr listen_socket;
+    socket_ptr client_socket;   // the connection currently being served, if any
+    bool       stop_requested = false;
+};
+typedef std::shared_ptr<rpc_server_instance> rpc_server_instance_ptr;
+static std::mutex g_rpc_servers_mutex;
+static std::unordered_map<std::string, rpc_server_instance_ptr> g_rpc_servers;
+
+void ggml_backend_rpc_stop_server(const char * endpoint) {
+    if (endpoint == nullptr) {
+        return;
+    }
+    rpc_server_instance_ptr instance;
+    socket_ptr listen_socket;
+    socket_ptr client_socket;
+    {
+        std::lock_guard<std::mutex> lock(g_rpc_servers_mutex);
+        auto it = g_rpc_servers.find(endpoint);
+        if (it == g_rpc_servers.end()) {
+            return;
+        }
+        instance = it->second;
+        instance->stop_requested = true;
+        listen_socket = instance->listen_socket;
+        client_socket = instance->client_socket;
+    }
+    // Kick the connection currently being served (if any) so rpc_serve_client's
+    // blocking recv fails and the serve loop returns.
+    if (client_socket != nullptr) {
+        client_socket->shutdown_rw();
+    }
+    // Wake a thread blocked in accept(). shutdown() on a listening socket wakes
+    // accept() on Linux/Android but is not reliable on Darwin, so additionally
+    // nudge the loop with a throw-away local connection; the loop re-checks
+    // stop_requested after every accept() return.
+    if (listen_socket != nullptr) {
+        listen_socket->shutdown_rw();
+    }
+    std::string host;
+    int port = 0;
+    if (parse_endpoint(endpoint, host, port)) {
+        if (host == "0.0.0.0") {
+            host = "127.0.0.1";
+        }
+        // Result intentionally ignored: if the connect fails the accept loop was
+        // already woken by the shutdown above (or the server is already gone).
+        socket_t::connect(host.c_str(), port);
+    }
+}
+
 void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir,
                                    size_t n_threads, size_t n_devices, ggml_backend_dev_t * devices) {
     if (n_devices == 0 || devices == nullptr) {
@@ -1733,6 +1787,9 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
     std::string host;
     int port;
     if (!parse_endpoint(endpoint, host, port)) {
+        for (auto backend : backends) {
+            ggml_backend_free(backend);
+        }
         return;
     }
 
@@ -1743,24 +1800,63 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
 #endif // GGML_RPC_RDMA
     if (!rpc_transport_init()) {
         GGML_LOG_ERROR("Failed to initialize RPC transport\n");
+        for (auto backend : backends) {
+            ggml_backend_free(backend);
+        }
         return;
     }
     auto server_socket = socket_t::create_server(host.c_str(), port);
     if (server_socket == nullptr) {
         GGML_LOG_ERROR("Failed to create server socket\n");
+        for (auto backend : backends) {
+            ggml_backend_free(backend);
+        }
         return;
+    }
+    // Register so ggml_backend_rpc_stop_server(endpoint) can stop this loop.
+    auto instance = std::make_shared<rpc_server_instance>();
+    instance->listen_socket = server_socket;
+    {
+        std::lock_guard<std::mutex> lock(g_rpc_servers_mutex);
+        g_rpc_servers[endpoint] = instance;
     }
     while (true) {
         auto client_socket = server_socket->accept();
+        {
+            std::lock_guard<std::mutex> lock(g_rpc_servers_mutex);
+            if (instance->stop_requested) {
+                break;
+            }
+            if (client_socket != nullptr) {
+                instance->client_socket = client_socket;
+            }
+        }
         if (client_socket == nullptr) {
             GGML_LOG_ERROR("Failed to accept client connection\n");
-            return;
+            break;
         }
         GGML_LOG_INFO("Accepted client connection\n");
-        fflush(stdout);
         rpc_serve_client(backends, cache_dir, client_socket);
         GGML_LOG_INFO("Client connection closed\n");
-        fflush(stdout);
+        {
+            std::lock_guard<std::mutex> lock(g_rpc_servers_mutex);
+            instance->client_socket.reset();
+            if (instance->stop_requested) {
+                break;
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_rpc_servers_mutex);
+        if (instance->stop_requested) {
+            GGML_LOG_INFO("RPC server stopped\n");
+        }
+        // Only erase our own registration — a replacement server may already
+        // have re-registered this endpoint after stopping this instance.
+        auto it = g_rpc_servers.find(endpoint);
+        if (it != g_rpc_servers.end() && it->second == instance) {
+            g_rpc_servers.erase(it);
+        }
     }
     rpc_transport_shutdown();
     for (auto backend : backends) {
@@ -1889,6 +1985,9 @@ static void * ggml_backend_rpc_get_proc_address(ggml_backend_reg_t reg, const ch
     }
     if (std::strcmp(name, "ggml_backend_rpc_start_server") == 0) {
         return (void *)ggml_backend_rpc_start_server;
+    }
+    if (std::strcmp(name, "ggml_backend_rpc_stop_server") == 0) {
+        return (void *)ggml_backend_rpc_stop_server;
     }
     return NULL;
 

@@ -27,6 +27,13 @@ GGML_BACKEND_API void ggml_backend_rpc_get_device_memory(const char * endpoint, 
 GGML_BACKEND_API void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir,
                                                     size_t n_threads, size_t n_devices, ggml_backend_dev_t * devices);
 
+// Gracefully stops a server previously started with ggml_backend_rpc_start_server
+// for the same endpoint string: wakes its accept loop (and kicks any connection
+// currently being served) so the blocked start_server call returns and frees its
+// backends. No-op if no server is running on that endpoint. Also resolvable via
+// ggml_backend_reg_get_proc_address(reg, "ggml_backend_rpc_stop_server").
+GGML_BACKEND_API void ggml_backend_rpc_stop_server(const char * endpoint);
+
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_rpc_reg(void);
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_rpc_add_server(const char * endpoint);
 

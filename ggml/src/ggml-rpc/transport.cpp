@@ -585,6 +585,17 @@ static bool set_reuse_addr(sockfd_t sockfd) {
     return ret == 0;
 }
 
+void socket_t::shutdown_rw() {
+    if (!is_valid_fd(pimpl->fd)) {
+        return;
+    }
+#ifdef _WIN32
+    ::shutdown(pimpl->fd, SD_BOTH);
+#else
+    ::shutdown(pimpl->fd, SHUT_RDWR);
+#endif
+}
+
 socket_ptr socket_t::accept() {
     auto client_socket_fd = ::accept(pimpl->fd, NULL, NULL);
     if (!is_valid_fd(client_socket_fd)) {
